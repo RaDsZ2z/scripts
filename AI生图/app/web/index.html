@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Banana 工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">B</span>
+      <div>
+        <strong>Banana 工作台</strong>
+      </div>
+    </div>
+    <div class="workspace-control">
+      <div class="workspace-copy">
+        <span>当前工作区</span>
+        <strong id="workspaceName">尚未选择</strong>
+      </div>
+      <button class="button primary" id="chooseWorkspace">选择文件夹</button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <section class="side-section">
+        <div class="section-label">服务商</div>
+        <div class="provider-list" id="providerList"></div>
+      </section>
+
+      <section class="side-section">
+        <div class="section-label">任务文件</div>
+        <div class="button-stack">
+          <button class="button secondary full" id="importJson">导入 JSON</button>
+          <button class="button secondary full" id="importExcel">导入 Excel</button>
+          <button class="button secondary full" id="exportTasks">导出 tasks_export.json</button>
+        </div>
+      </section>
+
+      <div class="sidebar-footer">
+        <button class="button danger full" id="clearTasks">清除任务</button>
+      </div>
+    </aside>
+
+    <main class="workspace-main">
+      <div class="content-heading">
+        <div>
+          <span class="eyebrow">任务编辑</span>
+          <h1>本次批次</h1>
+        </div>
+      </div>
+      <div class="task-list" id="taskList"></div>
+    </main>
+
+    <aside class="results-panel">
+      <div class="results-heading">
+        <div>
+          <span class="eyebrow">运行状态</span>
+          <h2 id="batchTitle">暂无批次</h2>
+        </div>
+        <span class="status-pill idle" id="batchStatus">空闲</span>
+      </div>
+      <div class="progress-wrap">
+        <div class="progress-track"><span id="progressBar"></span></div>
+        <span id="progressText">0 / 0</span>
+      </div>
+      <div class="result-list" id="resultList">
+        <div class="empty-state">提交批次后，结果会显示在这里。</div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="batch-actions">
+    <button class="button secondary large" id="addTask"><span aria-hidden="true">＋</span> 添加任务</button>
+    <button class="button primary large" id="submitBatch">提交批次</button>
+    <button class="button danger large hidden" id="stopBatch">停止等待任务</button>
+  </div>
+
+  <input type="file" id="jsonInput" accept=".json,application/json" hidden>
+  <input type="file" id="excelInput" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+
+  <template id="taskTemplate">
+    <article class="task-card">
+      <div class="task-card-head">
+        <div class="task-number"></div>
+        <div class="task-tools">
+          <button class="icon-button duplicate-task" title="复制任务" aria-label="复制任务">⧉</button>
+          <button class="icon-button delete-task" title="删除任务" aria-label="删除任务">×</button>
+        </div>
+      </div>
+      <label class="field-label">提示词</label>
+      <textarea class="prompt-input" rows="3" placeholder="输入这条任务的提示词"></textarea>
+      <div class="prompt-meta"><span class="validation-text"></span><span class="char-count">0 字</span></div>
+      <div class="reference-heading">
+        <label class="field-label">参考图</label>
+        <button class="text-button choose-images">选择图片</button>
+      </div>
+      <div class="dropzone" tabindex="0">
+        <strong>拖入参考图</strong>
+        <span>图片必须位于当前 workspace 内</span>
+      </div>
+      <div class="reference-list"></div>
+    </article>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
