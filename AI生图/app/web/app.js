@@ -130,31 +130,13 @@ function renderTasks() {
   });
 }
 
-async function openDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("banana-workbench", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("handles");
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function saveWorkspaceHandle(handle) {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("handles", "readwrite");
-    tx.objectStore("handles").put(handle, "workspace");
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function loadWorkspaceHandle() {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const request = db.transaction("handles").objectStore("handles").get("workspace");
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error);
+function clearSavedWorkspaceHandle() {
+  if (!window.indexedDB) return Promise.resolve();
+  return new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase("banana-workbench");
+    request.onsuccess = resolve;
+    request.onerror = resolve;
+    request.onblocked = resolve;
   });
 }
 
@@ -167,7 +149,6 @@ async function setWorkspace(handle, notify = true) {
   state.workspace = handle;
   $("#workspaceName").textContent = handle.name;
   $("#workspaceName").title = handle.name;
-  await saveWorkspaceHandle(handle);
   if (notify) toast(`工作区已切换为 ${handle.name}`, "success");
 }
 
@@ -177,7 +158,7 @@ async function chooseWorkspace() {
     return;
   }
   try {
-    const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "banana-workspace" });
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
     await setWorkspace(handle);
   } catch (error) {
     if (error.name !== "AbortError") toast(error.message, "error");
@@ -374,6 +355,10 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const body = await response.json();
+  if (response.status === 401) {
+    window.location.replace("/login");
+    throw new Error("登录已失效");
+  }
   if (!response.ok) throw new Error(body.error || `请求失败（${response.status}）`);
   return body;
 }
@@ -583,6 +568,7 @@ async function stopBatch() {
 
 async function loadProviders() {
   const config = await api("/api/config");
+  $("#logout").classList.toggle("hidden", !config.authentication_required);
   state.providers = config.providers;
   const list = $("#providerList");
   list.replaceChildren();
@@ -603,10 +589,6 @@ async function loadProviders() {
 }
 
 async function restoreState() {
-  try {
-    const handle = await loadWorkspaceHandle();
-    if (handle && await handle.queryPermission({ mode: "readwrite" }) === "granted") await setWorkspace(handle, false);
-  } catch { /* Workspace restoration is optional. */ }
   const jobId = localStorage.getItem("banana-active-job");
   if (jobId) {
     state.activeJob = { id: jobId };
@@ -621,6 +603,10 @@ $("#clearTasks").addEventListener("click", clearTasks);
 $("#exportTasks").addEventListener("click", exportTasks);
 $("#submitBatch").addEventListener("click", submitBatch);
 $("#stopBatch").addEventListener("click", stopBatch);
+$("#logout").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  window.location.replace("/login");
+});
 $("#importJson").addEventListener("click", () => $("#jsonInput").click());
 $("#importExcel").addEventListener("click", () => $("#excelInput").click());
 
@@ -649,6 +635,7 @@ $("#excelInput").addEventListener("change", async (event) => {
 });
 
 async function init() {
+  await clearSavedWorkspaceHandle();
   addTask();
   try {
     await loadProviders();

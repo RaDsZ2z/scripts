@@ -9,8 +9,10 @@
 如果首次启动提示缺少依赖，在当前目录运行：
 
 ```powershell
-python -m pip install -r requirements.txt
+py -m pip install -r requirements.txt
 ```
+
+如果电脑使用 `python` 命令，也可以将上述命令中的 `py` 替换为 `python`。
 
 推荐使用最新版 Chrome 或 Edge。页面仅通过 `127.0.0.1` 在本机访问。
 

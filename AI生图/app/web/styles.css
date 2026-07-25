@@ -71,6 +71,7 @@ button { letter-spacing: 0; }
   border-radius: 7px;
   background: var(--surface-soft);
 }
+.logout-button { grid-column: 3; justify-self: end; }
 .workspace-copy { display: flex; flex-direction: column; align-items: flex-end; max-width: 320px; }
 .workspace-copy span { color: var(--muted); font-size: 11px; }
 .workspace-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -271,6 +272,7 @@ h3 { font-size: 13px; }
 @media (max-width: 720px) {
   .topbar { height: auto; min-height: 68px; grid-template-columns: 1fr; align-items: center; padding: 12px 14px; gap: 10px; }
   .workspace-control { grid-column: 1; width: 100%; min-width: 0; justify-self: stretch; justify-content: space-between; }
+  .logout-button { grid-column: 1; grid-row: 1; justify-self: end; }
   .workspace-copy { align-items: flex-start; max-width: calc(100vw - 160px); }
   .app-shell { display: block; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); padding-bottom: 22px; }

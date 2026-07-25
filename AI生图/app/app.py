@@ -8,16 +8,21 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import hashlib
+import hmac
 import io
 import json
 import mimetypes
 import os
 import re
+import secrets
 import threading
 import time
 import uuid
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +33,12 @@ import requests
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
 MAX_BODY_BYTES = 300 * 1024 * 1024
+GLOBAL_API_CONCURRENCY = 5
+MAX_WORKERS_PER_JOB = 2
+JOB_RETENTION_SECONDS = 2 * 60 * 60
+JOB_CLEANUP_INTERVAL_SECONDS = 5 * 60
+SESSION_COOKIE_NAME = "banana_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
 
 PROVIDERS = {
     "ikun": {
@@ -48,10 +59,57 @@ PROVIDERS = {
 
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
+API_REQUEST_SLOTS = threading.BoundedSemaphore(GLOBAL_API_CONCURRENCY)
 
 
 def now_iso() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def auth_enabled() -> bool:
+    return bool(os.environ.get("BANANA_WEB_PASSWORD_HASH") and os.environ.get("BANANA_WEB_SESSION_SECRET"))
+
+
+def decode_urlsafe(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def password_matches(password: str) -> bool:
+    try:
+        algorithm, iterations_text, salt_text, expected_text = os.environ["BANANA_WEB_PASSWORD_HASH"].split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            decode_urlsafe(salt_text),
+            int(iterations_text),
+        )
+        return hmac.compare_digest(actual, decode_urlsafe(expected_text))
+    except (KeyError, ValueError):
+        return False
+
+
+def create_session_token() -> str:
+    expires_at = int(time.time()) + SESSION_TTL_SECONDS
+    payload = f"{expires_at}:{secrets.token_urlsafe(12)}".encode("ascii")
+    encoded_payload = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.digest(os.environ["BANANA_WEB_SESSION_SECRET"].encode("utf-8"), encoded_payload, "sha256")
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=")
+    return f"{encoded_payload.decode('ascii')}.{encoded_signature.decode('ascii')}"
+
+
+def session_token_is_valid(token: str) -> bool:
+    try:
+        encoded_payload, encoded_signature = token.split(".", 1)
+        payload_bytes = encoded_payload.encode("ascii")
+        expected = hmac.digest(os.environ["BANANA_WEB_SESSION_SECRET"].encode("utf-8"), payload_bytes, "sha256")
+        if not hmac.compare_digest(expected, decode_urlsafe(encoded_signature)):
+            return False
+        expires_text, _ = decode_urlsafe(encoded_payload).decode("ascii").split(":", 1)
+        return int(expires_text) >= int(time.time())
+    except (KeyError, ValueError, UnicodeError):
+        return False
 
 
 def load_api_key(provider: dict[str, Any]) -> str:
@@ -179,75 +237,111 @@ def generate_once(provider_id: str, prompt: str, images: list[dict[str, Any]]) -
     return extract_image(content_text)
 
 
+def run_task(job: dict[str, Any], index: int, task: dict[str, Any]) -> None:
+    with JOBS_LOCK:
+        result = job["results"][index]
+        if job["cancel_requested"]:
+            result.update({"status": "stopped", "finished_at": now_iso()})
+            return
+        result["status"] = "running"
+        result["started_at"] = now_iso()
+
+    last_error = ""
+    for attempt in range(1, 6):
+        while not API_REQUEST_SLOTS.acquire(timeout=0.5):
+            with JOBS_LOCK:
+                if job["cancel_requested"]:
+                    result.update({"status": "stopped", "finished_at": now_iso()})
+                    return
+        try:
+            with JOBS_LOCK:
+                if job["cancel_requested"]:
+                    result.update({"status": "stopped", "finished_at": now_iso()})
+                    return
+                result["attempt"] = attempt
+            image_bytes, image_format, response_text = generate_once(
+                job["provider"], task["prompt"], task.get("images") or []
+            )
+            with JOBS_LOCK:
+                result.update(
+                    {
+                        "status": "success",
+                        "message": "生成成功",
+                        "format": image_format,
+                        "text": response_text,
+                        "image_bytes": image_bytes,
+                        "finished_at": now_iso(),
+                    }
+                )
+            return
+        except Exception as exc:  # Keep one failed task from stopping the batch.
+            last_error = str(exc)
+            with JOBS_LOCK:
+                result["message"] = last_error
+                cancelled = job["cancel_requested"]
+            if cancelled:
+                with JOBS_LOCK:
+                    result.update({"status": "stopped", "finished_at": now_iso()})
+                return
+            if attempt < 5:
+                time.sleep(5)
+        finally:
+            API_REQUEST_SLOTS.release()
+
+    with JOBS_LOCK:
+        result.update({"status": "failed", "message": last_error, "finished_at": now_iso()})
+
+
 def run_job(job_id: str) -> None:
     with JOBS_LOCK:
         job = JOBS[job_id]
         job["status"] = "running"
         job["started_at"] = now_iso()
 
-    for index, task in enumerate(job["tasks"]):
-        with JOBS_LOCK:
-            if job["cancel_requested"]:
-                job["status"] = "stopped"
-                for remaining in job["results"][index:]:
-                    if remaining["status"] == "queued":
-                        remaining["status"] = "stopped"
-                job["finished_at"] = now_iso()
-                return
-            result = job["results"][index]
-            result["status"] = "running"
-            result["started_at"] = now_iso()
-
-        last_error = ""
-        for attempt in range(1, 6):
-            with JOBS_LOCK:
-                result["attempt"] = attempt
+    worker_count = min(MAX_WORKERS_PER_JOB, len(job["tasks"]))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"job-{job_id[:8]}") as executor:
+        futures = {
+            executor.submit(run_task, job, index, task): index
+            for index, task in enumerate(job["tasks"])
+        }
+        for future in as_completed(futures):
             try:
-                image_bytes, image_format, response_text = generate_once(
-                    job["provider"], task["prompt"], task.get("images") or []
-                )
+                future.result()
+            except Exception as exc:
                 with JOBS_LOCK:
-                    result.update(
-                        {
-                            "status": "success",
-                            "message": "生成成功",
-                            "format": image_format,
-                            "text": response_text,
-                            "image_bytes": image_bytes,
-                            "finished_at": now_iso(),
-                        }
-                    )
-                break
-            except Exception as exc:  # Keep one failed task from stopping the batch.
-                last_error = str(exc)
-                with JOBS_LOCK:
-                    result["message"] = last_error
-                    cancelled = job["cancel_requested"]
-                if cancelled:
-                    with JOBS_LOCK:
-                        result.update({"status": "stopped", "finished_at": now_iso()})
-                        job["status"] = "stopped"
-                        for remaining in job["results"][index + 1:]:
-                            if remaining["status"] == "queued":
-                                remaining["status"] = "stopped"
-                        job["finished_at"] = now_iso()
-                    return
-                if attempt < 5:
-                    time.sleep(5)
-        else:
-            with JOBS_LOCK:
-                result.update({"status": "failed", "message": last_error, "finished_at": now_iso()})
+                    result = job["results"][futures[future]]
+                    result.update({"status": "failed", "message": str(exc), "finished_at": now_iso()})
 
     with JOBS_LOCK:
-        job["status"] = "completed"
+        stopped = any(result["status"] == "stopped" for result in job["results"])
+        job["status"] = "stopped" if stopped else "completed"
         job["finished_at"] = now_iso()
+        job["_finished_monotonic"] = time.monotonic()
+
+
+def cleanup_jobs() -> None:
+    cutoff = time.monotonic() - JOB_RETENTION_SECONDS
+    with JOBS_LOCK:
+        expired_ids = [
+            job_id
+            for job_id, job in JOBS.items()
+            if job.get("_finished_monotonic", float("inf")) <= cutoff
+        ]
+        for job_id in expired_ids:
+            del JOBS[job_id]
+
+
+def cleanup_jobs_forever() -> None:
+    while True:
+        time.sleep(JOB_CLEANUP_INTERVAL_SECONDS)
+        cleanup_jobs()
 
 
 def parse_excel(encoded: str) -> list[dict[str, Any]]:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
-        raise ValueError("缺少 openpyxl，请先运行 python -m pip install openpyxl") from exc
+        raise ValueError("缺少 openpyxl，请运行 py -m pip install openpyxl（或 python -m pip install openpyxl）") from exc
     try:
         raw = base64.b64decode(encoded, validate=True)
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
@@ -288,12 +382,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")
 
-    def send_json(self, payload: Any, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -306,8 +402,42 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求内容为空或过大")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def is_authenticated(self) -> bool:
+        if not auth_enabled():
+            return True
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        session = cookie.get(SESSION_COOKIE_NAME)
+        return bool(session and session_token_is_valid(session.value))
+
+    def redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def require_authentication(self, path: str) -> bool:
+        if self.is_authenticated():
+            return True
+        if path.startswith("/api/"):
+            self.send_error_json("登录已失效，请重新登录", 401)
+        else:
+            self.redirect("/login")
+        return False
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in {"/login", "/login.html"}:
+            if self.is_authenticated():
+                self.redirect("/")
+            else:
+                self.serve_static("/login.html")
+            return
+        if parsed.path in {"/login.css", "/login.js"}:
+            self.serve_static(parsed.path)
+            return
+        if not self.require_authentication(parsed.path):
+            return
         if parsed.path == "/api/config":
             providers = [
                 {
@@ -318,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 for key, value in PROVIDERS.items()
             ]
-            self.send_json({"providers": providers})
+            self.send_json({"providers": providers, "authentication_required": auth_enabled()})
             return
 
         job_match = re.fullmatch(r"/api/jobs/([a-f0-9]+)", parsed.path)
@@ -359,6 +489,26 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
         except (ValueError, json.JSONDecodeError) as exc:
             self.send_error_json(str(exc))
+            return
+
+        if parsed.path == "/api/login":
+            password = str(payload.get("password", ""))
+            if not auth_enabled() or not password_matches(password):
+                self.send_error_json("密码错误", 401)
+                return
+            cookie = (
+                f"{SESSION_COOKIE_NAME}={create_session_token()}; Path=/; Max-Age={SESSION_TTL_SECONDS}; "
+                "HttpOnly; Secure; SameSite=Strict"
+            )
+            self.send_json({"ok": True}, headers={"Set-Cookie": cookie})
+            return
+
+        if parsed.path == "/api/logout":
+            cookie = f"{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
+            self.send_json({"ok": True}, headers={"Set-Cookie": cookie})
+            return
+
+        if not self.require_authentication(parsed.path):
             return
 
         if parsed.path == "/api/import-excel":
@@ -480,6 +630,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
+    password_configured = bool(os.environ.get("BANANA_WEB_PASSWORD_HASH"))
+    session_secret_configured = bool(os.environ.get("BANANA_WEB_SESSION_SECRET"))
+    if password_configured != session_secret_configured:
+        raise SystemExit("BANANA_WEB_PASSWORD_HASH 和 BANANA_WEB_SESSION_SECRET 必须同时配置")
     url = existing_instance_url(args.port)
     if url:
         print(f"Banana Web 已在运行：{url}")
@@ -493,6 +647,7 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"Banana Web 已启动：{url}")
     print("关闭此窗口即可停止服务。")
+    threading.Thread(target=cleanup_jobs_forever, daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
