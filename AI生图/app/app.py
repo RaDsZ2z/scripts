@@ -29,6 +29,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from api_key_config import get_api_key
+
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
@@ -47,6 +49,15 @@ PROVIDERS = {
         "env": "IKUN_BANANA_API_KEY",
         "api_url": "https://api.ikuncode.cc/v1/chat/completions",
         "model": "gemini-3.1-flash-image-preview",
+        "api_style": "chat",
+    },
+    "micu": {
+        "label": "Micu Gpt Image2",
+        "script": ROOT / "micu_gpt_image_2.py",
+        "env": "MICU_API_KEY",
+        "api_url": "https://www.micuapi.ai",
+        "model": "gpt-image-2",
+        "api_style": "images",
     },
     "banana": {
         "label": "Laozhang Banana",
@@ -54,6 +65,7 @@ PROVIDERS = {
         "env": "BANANA_API_KEY",
         "api_url": "https://api2.laozhang.ai/v1/chat/completions",
         "model": "gemini-3.1-flash-image",
+        "api_style": "chat",
     },
 }
 
@@ -113,15 +125,7 @@ def session_token_is_valid(token: str) -> bool:
 
 
 def load_api_key(provider: dict[str, Any]) -> str:
-    env_key = os.environ.get(provider["env"], "").strip()
-    if env_key:
-        return env_key
-    try:
-        source = provider["script"].read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    match = re.search(r'API_KEY\s*=\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]', source)
-    return match.group(1).strip() if match else ""
+    return get_api_key(provider["env"])
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -201,22 +205,55 @@ def generate_once(provider_id: str, prompt: str, images: list[dict[str, Any]]) -
     if not api_key:
         raise ValueError(f"{provider['label']} 未配置 API Key")
 
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image in images:
-        name, mime, encoded = decode_reference(image)
-        content.append({"type": "text", "text": f"参考图文件名：{name}"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
-
-    response = requests.post(
-        provider["api_url"],
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        json={
-            "model": provider["model"],
-            "stream": False,
-            "messages": [{"role": "user", "content": content}],
-        },
-        timeout=300,
-    )
+    if provider.get("api_style") == "images":
+        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        if images:
+            files = []
+            for image in images:
+                name, mime, encoded = decode_reference(image)
+                files.append(("image[]", (name, base64.b64decode(encoded), mime)))
+            response = requests.post(
+                f"{provider['api_url'].rstrip('/')}/v1/images/edits",
+                headers=headers,
+                data={
+                    "model": provider["model"],
+                    "prompt": prompt,
+                    "n": "1",
+                    "size": "1024x1024",
+                    "response_format": "b64_json",
+                },
+                files=files,
+                timeout=600,
+            )
+        else:
+            response = requests.post(
+                f"{provider['api_url'].rstrip('/')}/v1/images/generations",
+                headers={**headers, "Content-Type": "application/json; charset=utf-8"},
+                json={
+                    "model": provider["model"],
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": "1024x1024",
+                    "response_format": "b64_json",
+                },
+                timeout=600,
+            )
+    else:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image in images:
+            name, mime, encoded = decode_reference(image)
+            content.append({"type": "text", "text": f"参考图文件名：{name}"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
+        response = requests.post(
+            provider["api_url"],
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            json={
+                "model": provider["model"],
+                "stream": False,
+                "messages": [{"role": "user", "content": content}],
+            },
+            timeout=300,
+        )
     if response.status_code != 200:
         try:
             detail = response.json()
@@ -227,6 +264,32 @@ def generate_once(provider_id: str, prompt: str, images: list[dict[str, Any]]) -
         body = response.json()
     except ValueError as exc:
         raise RuntimeError("API 返回了无法解析的数据") from exc
+
+    if provider.get("api_style") == "images":
+        data = body.get("data") or []
+        item = data[0] if data and isinstance(data[0], dict) else {}
+        encoded = item.get("b64_json")
+        url = item.get("url")
+        if isinstance(encoded, str):
+            image_bytes = base64.b64decode(encoded, validate=True)
+        elif isinstance(url, str) and url.startswith("data:image/") and "," in url:
+            image_bytes = base64.b64decode(url.split(",", 1)[1])
+        elif isinstance(url, str) and url.startswith(("https://", "http://")):
+            image_response = requests.get(url, timeout=120)
+            image_response.raise_for_status()
+            image_bytes = image_response.content
+        else:
+            raise RuntimeError("API 响应中没有图片数据")
+        if len(image_bytes) < 100:
+            raise RuntimeError("API 返回的图片数据无效")
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            image_format = "jpeg"
+        elif image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            image_format = "webp"
+        else:
+            image_format = "png"
+        return image_bytes, image_format, str(item.get("revised_prompt") or "")
+
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("API 响应中没有 choices")
@@ -620,7 +683,7 @@ def existing_instance_url(port: int) -> str | None:
     providers = payload.get("providers") if isinstance(payload, dict) else None
     if response.status_code == 200 and isinstance(providers, list):
         provider_ids = {item.get("id") for item in providers if isinstance(item, dict)}
-        if {"banana", "ikun"}.issubset(provider_ids):
+        if {"banana", "ikun", "micu"}.issubset(provider_ids):
             return url
     return None
 

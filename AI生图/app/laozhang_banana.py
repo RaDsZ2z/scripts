@@ -15,6 +15,8 @@ import sys
 import datetime
 from typing import Optional, Tuple, List, Dict, Union
 
+from api_key_config import get_api_key
+
 # 修复 Windows 控制台编码问题
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -312,7 +314,9 @@ def batch_generate(generator: GeminiImageGenerator, tasks: List[Dict], output_di
 
 def main():
     # ===== 固定配置，一般不需要修改 =====
-    API_KEY = "YOUR_API_KEY"
+    api_key = get_api_key("BANANA_API_KEY")
+    if not api_key:
+        raise SystemExit("BANANA_API_KEY is not configured in api_keys.env")
     OUTPUT_DIR = "output"
     # ====================================
 
@@ -349,7 +353,7 @@ def main():
 
     print(f"📄 已读取任务文件，共 {len(tasks)} 个任务\n")
 
-    generator = GeminiImageGenerator(API_KEY)
+    generator = GeminiImageGenerator(api_key)
     batch_generate(generator, tasks, output_dir=output_dir, script_dir=script_dir)
 
     print(f"\n  结束时间: {datetime.datetime.now()}")

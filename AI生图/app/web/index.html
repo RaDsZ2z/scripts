@@ -35,7 +35,6 @@
         <div class="section-label">任务文件</div>
         <div class="button-stack">
           <button class="button secondary full" id="importJson">导入 JSON</button>
-          <button class="button secondary full" id="importExcel">导入 Excel</button>
           <button class="button secondary full" id="exportTasks">导出 tasks_export.json</button>
         </div>
       </section>
@@ -80,7 +79,6 @@
   </div>
 
   <input type="file" id="jsonInput" accept=".json,application/json" hidden>
-  <input type="file" id="excelInput" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
 
   <template id="taskTemplate">

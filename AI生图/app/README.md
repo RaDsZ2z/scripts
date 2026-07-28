@@ -1,6 +1,6 @@
 # Banana 工作台
 
-这是 `laozhang_banana.py` 和 `ikun_banana.py` 的本地浏览器界面。原脚本仍可单独运行。
+这是 `laozhang_banana.py`、`ikun_banana.py` 和 `micu_gpt_image_2.py` 的本地浏览器界面。三个脚本仍可单独运行。
 
 ## 启动
 
@@ -35,13 +35,12 @@ workspace/output/月_日_时_分_秒/
 
 JSON 与原脚本兼容。`image_path` 可以是字符串或数组，导出时始终使用数组。相对路径以当前 workspace 为基准。
 
-Excel 使用 `.xlsx` 格式，第一行包含 `prompt` 和可选的 `image_path`。一行对应一条任务；多张参考图路径使用英文或中文分号分隔。
-
 ## API Key
 
-工具优先读取环境变量：
+API Key 统一保存在与脚本同目录的 `api_keys.env` 中。先复制 `api_keys.env.example`，再填写：
 
 - `BANANA_API_KEY`
 - `IKUN_BANANA_API_KEY`
+- `MICU_API_KEY`
 
-未设置环境变量时，会沿用两个原脚本中的 `API_KEY`。密钥不会发送到前端页面。
+`api_keys.env` 已加入仓库根目录的 `.gitignore`，不会被 Git 跟踪。环境变量可覆盖文件中的同名配置；密钥不会发送到前端页面，也不应写入任何 Python 脚本。

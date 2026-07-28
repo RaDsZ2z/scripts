@@ -581,10 +581,21 @@ async function loadProviders() {
         <span class="provider-dot ${provider.configured ? "" : "offline"}"></span>
         <span class="provider-copy"><strong>${provider.label}</strong><span>${provider.configured ? provider.model : "未配置 API Key"}</span></span>
       </label>`;
+    option.querySelector("input").addEventListener("change", (event) => {
+      if (!event.target.checked) return;
+      document.querySelector(".provider-switch-notice")?.remove();
+      const notice = document.createElement("div");
+      notice.className = "provider-switch-notice";
+      notice.setAttribute("role", "status");
+      notice.textContent = `已切换至 ${provider.label}`;
+      option.appendChild(notice);
+      window.setTimeout(() => notice.remove(), 2400);
+    });
     list.appendChild(option);
   });
   if (!document.querySelector('input[name="provider"]:checked')) {
-    document.querySelector('input[name="provider"]:not(:disabled)')?.click();
+    const firstAvailable = document.querySelector('input[name="provider"]:not(:disabled)');
+    if (firstAvailable) firstAvailable.checked = true;
   }
 }
 
@@ -608,7 +619,6 @@ $("#logout").addEventListener("click", async () => {
   window.location.replace("/login");
 });
 $("#importJson").addEventListener("click", () => $("#jsonInput").click());
-$("#importExcel").addEventListener("click", () => $("#excelInput").click());
 
 $("#jsonInput").addEventListener("change", async (event) => {
   const file = event.target.files[0];
@@ -618,19 +628,6 @@ $("#jsonInput").addEventListener("change", async (event) => {
     await importTaskData(JSON.parse(await file.text()));
   } catch (error) {
     toast(`JSON 导入失败：${error.message}`, "error");
-  }
-});
-
-$("#excelInput").addEventListener("change", async (event) => {
-  const file = event.target.files[0];
-  event.target.value = "";
-  if (!file) return;
-  try {
-    const data = await fileToBase64(file);
-    const response = await api("/api/import-excel", { method: "POST", body: JSON.stringify({ data }) });
-    await importTaskData(response.tasks);
-  } catch (error) {
-    toast(`Excel 导入失败：${error.message}`, "error");
   }
 });
 
