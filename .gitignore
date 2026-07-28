@@ -1,4 +1,0 @@
-# AI image tool: local credentials and runtime output
-/AI生图/app/api_keys.env
-/AI生图/app/output/
-/AI生图/app/__pycache__/
